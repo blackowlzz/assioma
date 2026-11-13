@@ -388,6 +388,7 @@ function toolsPage() {
     opt('autosave', 'When the window loses focus', 'Save automatically', onOff),
     opt('trimSave', 'Removes spaces at the end of lines when a file is saved', 'Trim trailing spaces', onOff),
     opt('newlineSave', 'Makes sure the file ends with a new line when it is saved', 'Final new line', onOff),
+    opt('updates', 'At startup, from GitHub', 'Check for updates', onOff),
     opt('discord', 'Shows the file and project you are working on in your Discord profile, if Discord is open', 'Discord status', onOff, () => presence.sync()),
     opt('termBar', 'A separate command field, or typing straight into the shell', 'Terminal input', [[true, 'Command bar'], [false, 'Classic']], () => app.term?.syncBar()),
   )

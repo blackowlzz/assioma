@@ -38,11 +38,23 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "createUpdaterArtifacts": true,
     "windows": {
       "nsis": {
         "installMode": "currentUser",
         "installerIcon": "icons/icon.ico",
         "installerHooks": "windows/hooks.nsh"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM2NDY1QzgxODE1MTRBMDUKUldRRlNsR0JnVnhHTnVUMHVFVXNENDVhcU1ZNmdXMDVKOXNnb0YrVjNpUFFnN2dDTjVCTElNc3gK",
+      "endpoints": [
+        "https://github.com/blackowlzz/assioma/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

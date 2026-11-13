@@ -12,6 +12,7 @@ import * as presence from './presence.js'
 import * as layout from './layout.js'
 import * as settingsPage from './settings.js'
 import { renderHome, tile } from './welcome.js'
+import * as update from './update.js'
 
 function applyLook() {
   theme.apply()
@@ -1387,12 +1388,6 @@ function cycleTab(d) {
   activate(state.tabs[(i + d + state.tabs.length) % state.tabs.length].id)
 }
 
-reg('about', 'About Assioma', null, async () => {
-  const version = await invoke('app_version')
-  let close
-  close = modal(h('div', { class: 'dialog' }, h('h3', {}, 'Assioma'), h('p', { class: 'muted' }, `Version ${version}`), h('p', { class: 'muted' }, 'A light code editor for many languages, with a built-in AI that runs on your computer.'), h('div', { class: 'actions' }, h('button', { class: 'primary', onclick: () => close() }, 'Close'))))
-})
-
 const MENUS = {
   File: ['open-folder', 'new-folder', 'new-file', '-', 'save', 'save-all', 'close-tab', '-', 'settings', 'close-project', 'quit'],
   Edit: ['undo', 'redo', '-', 'find', 'replace', 'find-project', '-', 'expand', 'shrink', 'duplicate', 'delete-line', 'move-up', 'move-down', 'join', 'comment', '-', 'select-all'],
@@ -1400,7 +1395,7 @@ const MENUS = {
   Go: ['actions', 'quick-open', 'recent', 'goto-line', '-', 'back', 'forward', 'next-tab', 'prev-tab'],
   Run: ['run', 'stop', '-', 'run-config'],
   Git: ['commit', 'git-pull', 'git-push', 'git-branch'],
-  Help: ['keymap', 'actions', '-', 'install-cli', 'about'],
+  Help: ['keymap', 'actions', '-', 'install-cli', 'check-updates', 'about'],
 }
 
 function renderMenus() {
@@ -1451,6 +1446,8 @@ function renderMenus() {
   }
   fitBar()
 }
+
+app.fitBar = fitBar
 
 function fitBar() {
   const open = !!state.root && $('bar').classList.contains('menus-open')
@@ -1631,6 +1628,7 @@ async function start() {
   app.syncChat()
   if (settings.aiChat && load('chatOpen', false)) toggleChat(true)
   ai.startup()
+  update.startup()
 }
 
 start()

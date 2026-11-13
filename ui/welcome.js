@@ -168,6 +168,7 @@ function render() {
       h('div', { class: 'wel-brand' }, h('span', { class: 'logo' }, h('span', { class: 'mark' })), h('div', {}, h('div', { class: 'wn' }, 'Assioma'), h('div', { class: 'wv' }, version))),
       h('nav', { class: 'wel-nav' }, nav('projects', 'Projects'), nav('customize', 'Customize'), nav('learn', 'Learn')),
       h('span', { class: 'grow' }),
+      h('button', { class: 'wel-link', onclick: () => actions.get('check-updates').run() }, 'Check for Updates'),
     ),
     h('main', { class: 'wel-main' }, content),
   )

@@ -21,6 +21,7 @@ mod suggest;
 mod tm;
 mod term;
 mod tools;
+mod update;
 mod words;
 
 use doc::{Cmd, Doc, View};
@@ -183,6 +184,18 @@ fn discord_presence(activity: Option<discord::Activity>) {
 #[tauri::command]
 fn app_version(app: AppHandle) -> String {
     app.package_info().version.to_string()
+}
+
+#[tauri::command]
+async fn update_check(app: AppHandle) -> Res<Option<update::UpdateInfo>> {
+    update::check(&app).await
+}
+
+#[tauri::command]
+async fn update_install(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
+    update::install(&app).await?;
+    stop_children(&state);
+    app.restart()
 }
 
 #[tauri::command(async)]
@@ -1558,6 +1571,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             docs: Mutex::new(HashMap::new()),
             lsp: lsp::Servers::default(),
@@ -1609,6 +1623,8 @@ fn main() {
             doc_copy,
             discord_presence,
             app_version,
+            update_check,
+            update_install,
             doc_open_virtual,
             doc_apply_edits,
             lsp_root,
