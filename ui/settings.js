@@ -12,6 +12,7 @@ const SECTIONS = [
   ['interface', 'Interface'],
   ['editor', 'Editor'],
   ['tools', 'General'],
+  ['lsp', 'Language Servers'],
   ['ai', 'AI'],
 ]
 
@@ -392,7 +393,29 @@ function toolsPage() {
   )
 }
 
-const PAGES = { theme: themePage, colors: colorsPage, interface: interfacePage, editor: editorPage, tools: toolsPage, ai: aiPage }
+/** The language servers Assioma knows, found or not, each with a switch and an optional command of one's own. */
+function lspPage() {
+  const page = h('div', {}, h('p', { class: 'muted', style: 'padding:6px 0' }, 'Looking for the servers…'))
+  const save = (id, patch) => {
+    settings.lspConfig = { ...settings.lspConfig, [id]: { enabled: true, command: '', ...settings.lspConfig[id], ...patch } }
+    store('lspConfig', settings.lspConfig)
+    invoke('lsp_config', { config: settings.lspConfig }).catch(() => {})
+  }
+  invoke('lsp_servers').then((rows) => {
+    page.replaceChildren(
+      h('p', { class: 'muted', style: 'padding:6px 0' }, 'As in VS Code, a language server gives errors as you type, go to definition, references, rename, quick fixes and smarter completion. Assioma starts the one installed on your computer when you open a file of its language, and nothing is sent anywhere.'),
+      ...rows.map((r) => {
+        const cfg = { enabled: true, command: '', ...settings.lspConfig[r.id] }
+        const found = r.command ? `Uses ${r.command}` : `Not installed. ${r.install}`
+        const input = h('input', { value: cfg.command, placeholder: 'A command of your own, if it lives elsewhere', spellcheck: 'false', style: 'width:100%', onchange: (e) => save(r.id, { command: e.target.value.trim() }) })
+        return h('div', { class: 'lsp-server' }, row(r.name, `${r.languages.join(', ')}. ${found}`, seg([[true, 'On'], [false, 'Off']], cfg.enabled, (v) => save(r.id, { enabled: v }))), input)
+      }),
+    )
+  })
+  return page
+}
+
+const PAGES = { theme: themePage, colors: colorsPage, interface: interfacePage, editor: editorPage, tools: toolsPage, lsp: lspPage, ai: aiPage }
 
 export function customizeView(initial = 'theme') {
   let section = initial

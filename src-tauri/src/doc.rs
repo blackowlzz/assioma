@@ -1066,6 +1066,11 @@ impl Doc {
         Some((a, b))
     }
 
+    /// The line and column shown at a cell of the view (wrapped rows and folds counted).
+    pub fn point_at(&self, row: usize, vcol: usize) -> (usize, usize) {
+        self.pos(self.pos_at_cell(row, vcol))
+    }
+
     pub fn word_at(&self, row: usize, vcol: usize) -> Option<String> {
         let at = self.pos_at_cell(row, vcol);
         let (a, b) = self.word_range(at)?;

@@ -107,6 +107,7 @@ layout.define(
         t.shown()
       },
     },
+    problems: { title: 'Problems', icon: 'alert', tip: 'Problems (Alt+6)', home: 'bottom', shown: () => refreshProblems() },
   },
   {
     onChange: () => {
@@ -216,6 +217,7 @@ async function openProject(path) {
   if (state.root) await closeProject()
   state.root = path
   presence.sync()
+  invoke('lsp_root', { root: path }).catch(() => {})
   state.files = null
   store('recent', [path, ...recents().filter((p) => p !== path)].slice(0, 20))
   store('recentTime', { ...load('recentTime', {}), [path]: Date.now() })
@@ -951,23 +953,34 @@ app.afterExternalChange = async () => {
 let lspTimer = 0
 const lastRev = new Map()
 
+let statusDoc = null
 function setStatusEmpty() {
-  for (const id of ['st-msg', 'st-pos', 'st-indent', 'st-eol', 'st-lang', 'st-path']) $(id).textContent = ''
+  statusDoc = null
+  for (const id of ['st-msg', 'st-pos', 'st-diag', 'st-lsp', 'st-indent', 'st-eol', 'st-lang', 'st-path']) $(id).textContent = ''
 }
 
 ed.configure({
-  onChange(id, v) {
-    intel.viewChanged(v)
+  onChange(id, v, focused = true) {
     const tab = state.tabs.find((t) => t.id === id)
     if (!tab) return
     if (tab.dirty !== v.dirty) {
       tab.dirty = v.dirty
       renderTabs()
     }
+    // The other group drew: the status bar and the caret's helpers belong to the one with the focus.
+    if (!focused) return
+    intel.viewChanged(v)
     $('st-pos').textContent = `${v.line + 1}:${v.col}`
     $('st-indent').textContent = v.readonly ? 'Read only' : v.use_tabs ? 'Tabs' : `${v.tab} spaces`
     $('st-eol').textContent = v.crlf ? 'CRLF' : 'LF'
     $('st-lang').textContent = v.lang
+    const plural = (n, w) => (n ? `${n} ${w}${n === 1 ? '' : 's'}` : '')
+    const diagText = [plural(v.errors, 'error'), plural(v.warnings, 'warning')].filter(Boolean).join('  ')
+    if ($('st-diag').textContent !== diagText) $('st-diag').textContent = diagText
+    if (statusDoc !== id) {
+      statusDoc = id
+      intel.refreshStatus()
+    }
     if (!state.running) $('st-msg').textContent = v.msg ?? ''
     if (!tab.virtual) {
       const c = cursors[tab.path]
@@ -994,6 +1007,34 @@ ed.configure({
 
 let lastEdit = null
 const rel = (p) => (state.root && p.startsWith(state.root + SEP) ? p.slice(state.root.length + 1) : p)
+
+let problemsTimer = 0
+listen('diag', (e) => {
+  if (e.payload === state.active) ed.repaint()
+  intel.requestSemantic(e.payload)
+  clearTimeout(problemsTimer)
+  problemsTimer = setTimeout(() => guard(refreshProblems()), 300)
+})
+$('st-diag').addEventListener('click', () => showBottom('problems'))
+
+/** What the language servers found wrong in the open files. */
+async function refreshProblems() {
+  if (!layout.isShown('problems')) return
+  const el = $('v-problems')
+  const found = new Map()
+  for (const t of state.tabs) {
+    if (t.virtual) continue
+    const d = await invoke('doc_diags', { id: t.id })
+    if (d.length) found.set(t.path, d.map((i) => ({ ...i, path: t.path })))
+  }
+  el.replaceChildren()
+  if (!found.size) {
+    el.append(h('div', { class: 'notice' }, 'No problems in open files'))
+    return
+  }
+  groupHits(el, found, (i) => h('div', { class: 'hit', onclick: () => guard(jumpTo(i.path, i.line, i.col)) }, h('span', { class: 'sev' + (i.sev === 1 ? ' e' : '') }, i.sev === 1 ? 'E' : i.sev === 2 ? 'W' : 'I'), h('span', { class: 'ln' }, i.line + 1), i.msg))
+}
+app.refreshProblems = () => guard(refreshProblems())
 
 function groupHits(el, groups, renderHit) {
   el.append(
@@ -1255,6 +1296,7 @@ reg('close-project', 'Close Project', null, async () => {
   await closeProject()
   state.root = null
   presence.sync()
+  invoke('lsp_root', { root: null }).catch(() => {})
   $('work').hidden = true
   $('status').hidden = true
   $('run-tools').hidden = true
@@ -1321,6 +1363,7 @@ reg('tw-find', 'Find', 'A-3', () => showBottom('find', false))
 reg('tw-output', 'Output', 'A-b', () => showBottom('build', false))
 reg('tw-run', 'Run', 'A-4', () => showBottom('run', false))
 reg('tw-terminal', 'Terminal', 'A-F12', () => showBottom('terminal', false))
+reg('tw-problems', 'Problems', 'A-6', () => showBottom('problems', false))
 reg('tw-chat', 'AI Chat', 'A-8', () => chatButton())
 reg('switch-theme', 'Switch Theme…', 'C-`', quickTheme)
 
@@ -1420,13 +1463,13 @@ ed.hooks({
   beforeKey: intel.beforeKey,
   afterType: intel.afterType,
   typed: intel.typed,
-  ctrlClick: () => {},
+  ctrlClick: () => app.gotoDefinition?.(),
   pointer: intel.hidePopups,
   scrolled: () => {
     $('hover').hidden = true
   },
-  hover: () => {},
-  hoverEnd: () => {},
+  hover: (cell, point) => intel.mouseHover(cell, point),
+  hoverEnd: () => intel.hoverEnd(),
   context: (c, e) => {
     const editable = !activeTab()?.virtual
     const item = (id, enabled = true) => {
@@ -1434,6 +1477,12 @@ ed.hooks({
       return [a.title, () => guard(a.run()), keyLabel(a.key), enabled]
     }
     showMenu(e.clientX, e.clientY, [
+      item('goto-def'),
+      item('references'),
+      item('rename-symbol', editable),
+      item('quick-fix', editable),
+      item('format-doc', editable),
+      '-',
       item('comment', editable),
       item('duplicate', editable),
       '-',
@@ -1577,6 +1626,7 @@ async function start() {
     await guard(openProject(arg.root))
     if (arg.file) await guard(openFile(arg.file))
   }
+  invoke('lsp_config', { config: settings.lspConfig }).catch(() => {})
   await invoke('app_ready')
   app.syncChat()
   if (settings.aiChat && load('chatOpen', false)) toggleChat(true)

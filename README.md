@@ -14,6 +14,8 @@ From a terminal you can open a folder with `assioma .`: turn that on once from H
 
 **Your languages, colored like in VS Code.** Assioma uses the same TextMate grammars, so C, C++, C#, CSS, Dart, Go, HTML, Java, JavaScript, TypeScript, JSON, Lua, Markdown, PHP, PowerShell, Python, R, Ruby, Rust, Shell, SQL, Swift, XML, YAML, Dockerfile, Makefile and many more look the way you're used to. If a file has an unusual name, pick its language from the status bar.
 
+**Language servers, like in VS Code.** If you have a language server installed (clangd, rust-analyzer, Pyright, gopls, typescript-language-server and many others), Assioma starts it when you open a file of its language. You get errors as you type, go to definition (F12 or Ctrl+click), find all references (Shift+F12), rename (F2), quick fixes (Ctrl+.), formatting (Shift+Alt+F), hovers, parameter hints and smarter completion. The status bar tells you which server is working, and if one is missing Assioma tells you how to install it. Settings > Language Servers lists them all, lets you turn any of them off, or point Assioma to one installed somewhere else.
+
 **Extensions from Open VSX.** Press Ctrl+Shift+X to search [open-vsx.org](https://open-vsx.org), the open marketplace for VS Code extensions, and install color themes, language grammars and snippets. Assioma never runs extension code, which keeps it light and safe, but it also means language servers and debuggers from extensions don't work. The panel tells you when that's the case.
 
 **A layout you arrange yourself.** Every tool window (Project, Commit, Extensions, Find, Run, Terminal, the AI chat) can go in the left side bar, the right one, or the panel at the bottom. Drag its icon, or its tab, where you want it, and Assioma remembers. Right-click an icon to move it from a menu, or to reset everything.
@@ -48,6 +50,10 @@ Mostly the same as VS Code. Ctrl+Shift+A finds any command if you forget one.
 | Ctrl+Shift+A | Find any command |
 | Ctrl+Shift+F | Search the project |
 | Ctrl+Shift+X | Extensions |
+| F12, Shift+F12 | Go to definition, find all references |
+| F2, Ctrl+. | Rename, quick fix |
+| Shift+Alt+F | Format the document |
+| Ctrl+Shift+O, Ctrl+T | Go to a symbol in the file, in the project |
 | Ctrl+\ | Split the editor |
 | Shift+F10, Ctrl+F2 | Run, stop |
 | Ctrl+/ | Comment |
@@ -67,9 +73,9 @@ Everything visual is in Settings: themes and every single color, fonts, spacing,
 
 I'd rather tell you now than have you find out:
 
-- There's no language server yet, so no hover, go to definition or rename. Completion comes from the words in your files, and the AI does the rest.
+- Language servers aren't bundled: you install the ones you want, and Assioma finds them.
 - There's no debugger.
-- Extensions can add themes, languages and snippets, but not code.
+- Extensions can add themes, languages and snippets, but not code, so language servers come from your system rather than from extensions.
 - When the same file is open in both halves of a split, the two share one cursor.
 
 ## Building it yourself

@@ -14,6 +14,7 @@ mod grammars;
 mod langs;
 mod lexer;
 mod llama;
+mod lsp;
 mod project;
 mod runner;
 mod suggest;
@@ -24,7 +25,9 @@ mod words;
 
 use doc::{Cmd, Doc, View};
 use runner::Runner;
+use lsp::{parse_workspace_edit, path_from_uri, uri_from_path, FileEdits, Lsp};
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -42,6 +45,7 @@ pub struct AppState {
     runner: Arc<Runner>,
     terms: Mutex<HashMap<u32, Arc<term::Term>>>,
     next_term: AtomicU32,
+    lsp: lsp::Servers,
 }
 
 type Res<T> = Result<T, String>;
@@ -153,6 +157,7 @@ fn install_cli() -> Res<String> {
 
 fn stop_children(state: &AppState) {
     state.runner.kill();
+    state.lsp.stop_all();
     llama::stop();
     let terms: Vec<_> = state.terms.lock().unwrap().drain().collect();
     for (id, t) in terms {
@@ -267,7 +272,12 @@ fn doc_open(path: String, state: State<AppState>) -> Res<Opened> {
 
 #[tauri::command]
 fn doc_close(id: u32, state: State<AppState>) {
-    state.docs.lock().unwrap().remove(&id);
+    let doc = state.docs.lock().unwrap().remove(&id);
+    if let Some(doc) = doc {
+        if let Some(l) = doc.lang.lsp_id().and_then(|lang| state.lsp.running_for(lang)) {
+            l.close(&doc);
+        }
+    }
 }
 
 /// Off the window's thread, which also puts the frames on screen: a slow view (a grammar
@@ -380,6 +390,12 @@ fn doc_save(id: u32, force: bool, unlock: Option<bool>, state: State<AppState>) 
         return Ok(false);
     }
     write_safely(&path, &text, "assioma", unlock.unwrap_or(false))?;
+    let lang = state.docs.lock().unwrap().get(&id).and_then(|d| d.lang.lsp_id());
+    if let Some(l) = lang.and_then(|lang| state.lsp.running_for(lang)) {
+        if let Some(d) = state.docs.lock().unwrap().get(&id) {
+            l.saved(d);
+        }
+    }
     let now = mtime(&path);
     if let Some(doc) = state.docs.lock().unwrap().get_mut(&id) {
         doc.mtime = now;
@@ -476,6 +492,10 @@ fn fs_rename(from: String, to: String, state: State<AppState>) -> Res<Vec<Opened
     for (id, d) in docs.iter_mut() {
         let Ok(rest) = d.path.strip_prefix(&old) else { continue };
         let path = if rest.as_os_str().is_empty() { new.clone() } else { new.join(rest) };
+        // Under its new name it is another file for the language server.
+        if let Some(l) = d.lang.lsp_id().and_then(|lang| state.lsp.running_for(lang)) {
+            l.close(d);
+        }
         d.moved_to(path);
         let shown = d.path.to_string_lossy().into_owned();
         let name = d.path.file_name().map_or_else(|| shown.clone(), |n| n.to_string_lossy().into_owned());
@@ -603,6 +623,381 @@ struct Completions {
     prefix: String,
     incomplete: bool,
     items: Vec<Completion>,
+}
+
+// Language servers. Each document goes to the server of its language, started when first needed.
+
+fn lsp_of(app: &AppHandle, state: &AppState, id: u32) -> Res<Arc<Lsp>> {
+    let lang = {
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&id).ok_or("Document is closed")?;
+        doc.lang.lsp_id().ok_or("No language server for this file")?
+    };
+    state.lsp.client(app, lang)
+}
+
+fn at_cursor(id: u32, lsp: &Lsp, state: &AppState) -> Res<(Value, String, String)> {
+    lsp.sync(state, id)?;
+    let docs = state.docs.lock().unwrap();
+    let doc = docs.get(&id).ok_or("Document is closed")?;
+    let (line, col) = doc.cursor_pos();
+    let params = json!({
+        "textDocument": {"uri": uri_from_path(&doc.path)},
+        "position": {"line": line, "character": doc.utf16_col(line, col)},
+    });
+    Ok((params, doc.prefix(), doc.before_prefix()))
+}
+
+/// The folder of the project: servers start there. A new folder stops the running ones.
+#[tauri::command(async)]
+fn lsp_root(root: Option<String>, state: State<'_, AppState>) {
+    state.lsp.set_root(root.map(|r| fs::canonicalize(&r).unwrap_or_else(|_| r.into())));
+}
+
+#[tauri::command(async)]
+fn lsp_config(config: HashMap<String, lsp::Config>, state: State<'_, AppState>) {
+    state.lsp.set_config(config);
+}
+
+#[derive(Serialize)]
+struct ServerRow {
+    id: &'static str,
+    name: &'static str,
+    languages: &'static [&'static str],
+    /// The command it would be started with, when one is installed.
+    command: Option<String>,
+    install: &'static str,
+    status: lsp::Status,
+}
+
+#[tauri::command(async)]
+fn lsp_servers(state: State<'_, AppState>) -> Vec<ServerRow> {
+    lsp::SERVERS
+        .iter()
+        .map(|s| ServerRow {
+            id: s.id,
+            name: s.name,
+            languages: s.languages,
+            command: lsp::command_for(s, &state.lsp.config_of(s.id)).map(|(p, a)| std::iter::once(p.to_string_lossy().into_owned()).chain(a).collect::<Vec<_>>().join(" ")),
+            install: s.install,
+            status: state.lsp.status(s.languages.first().copied()),
+        })
+        .collect()
+}
+
+/// How the server of a document is doing, for the status bar.
+#[tauri::command(async)]
+fn lsp_status(id: u32, state: State<'_, AppState>) -> lsp::Status {
+    let lang = state.docs.lock().unwrap().get(&id).and_then(|d| d.lang.lsp_id());
+    state.lsp.status(lang)
+}
+
+#[tauri::command(async)]
+fn lsp_restart(server: String, state: State<'_, AppState>) {
+    state.lsp.stop(&server);
+}
+
+#[tauri::command(async)]
+fn lsp_sync(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<()> {
+    lsp_of(&app, &state, id)?.sync(&state, id)
+}
+
+#[tauri::command(async)]
+fn lsp_complete(id: u32, force: bool, app: AppHandle, state: State<'_, AppState>) -> Res<Completions> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (params, prefix, before) = at_cursor(id, &lsp, &state)?;
+    let member = before.ends_with('.') || before.ends_with("->") || before.ends_with("::");
+    if !force && !member && prefix.chars().count() < 2 {
+        return Ok(Completions { prefix, incomplete: false, items: vec![] });
+    }
+    let (indent, unit) = {
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&id).ok_or("Document is closed")?;
+        (doc.line_start_text().chars().take_while(|c| c.is_whitespace()).collect::<String>(), doc.indent_unit())
+    };
+    let res = lsp.request("textDocument/completion", params, lsp::TIMEOUT)?;
+    let incomplete = res["isIncomplete"].as_bool().unwrap_or(false);
+    let list = res.get("items").unwrap_or(&res).as_array().cloned().unwrap_or_default();
+    let mut sorted: Vec<&Value> = list.iter().collect();
+    sorted.sort_by_key(|i| i["sortText"].as_str().or(i["label"].as_str()).unwrap_or("").to_string());
+    let items = sorted
+        .iter()
+        .take(80)
+        .map(|i| {
+            let label = i["label"].as_str().unwrap_or("").trim().trim_start_matches('•').trim().to_string();
+            let text = i["textEdit"]["newText"].as_str().or(i["insertText"].as_str()).unwrap_or(&label).to_string();
+            // A snippet (insertTextFormat 2) has tab stops, the same syntax as VS Code's snippets.
+            let (insert, stops) = if i["insertTextFormat"].as_u64() == Some(2) { ext::expand(&text, &indent, &unit) } else { (text, vec![]) };
+            let key = i["filterText"].as_str().map(String::from).or_else(|| (!stops.is_empty()).then(|| label.clone()));
+            Completion { detail: i["detail"].as_str().unwrap_or("").to_string(), insert, label, key, stops }
+        })
+        .collect();
+    Ok(Completions { prefix, incomplete, items })
+}
+
+#[derive(Serialize)]
+struct Location {
+    path: String,
+    line: usize,
+    col: usize,
+}
+
+fn location(loc: &Value) -> Option<Location> {
+    let uri = loc["uri"].as_str().or(loc["targetUri"].as_str())?;
+    let range = if loc["range"].is_object() { &loc["range"] } else { &loc["targetSelectionRange"] };
+    Some(Location {
+        path: path_from_uri(uri)?.to_string_lossy().into_owned(),
+        line: range["start"]["line"].as_u64().unwrap_or(0) as usize,
+        col: range["start"]["character"].as_u64().unwrap_or(0) as usize,
+    })
+}
+
+#[tauri::command(async)]
+fn lsp_definition(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<Option<Location>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (params, _, _) = at_cursor(id, &lsp, &state)?;
+    let res = lsp.request("textDocument/definition", params, lsp::TIMEOUT)?;
+    let loc = if res.is_array() { res.get(0).cloned().unwrap_or(Value::Null) } else { res };
+    Ok(location(&loc))
+}
+
+#[tauri::command(async)]
+fn lsp_hover(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<String> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (params, _, _) = at_cursor(id, &lsp, &state)?;
+    let res = lsp.request("textDocument/hover", params, lsp::TIMEOUT)?;
+    Ok(lsp::hover_text(&res["contents"]))
+}
+
+/// The hover of the symbol under the pointer, as VS Code shows it.
+#[tauri::command(async)]
+fn lsp_hover_at(id: u32, row: usize, vcol: usize, app: AppHandle, state: State<'_, AppState>) -> Res<String> {
+    let lsp = lsp_of(&app, &state, id)?;
+    if !lsp.can("hoverProvider") {
+        return Ok(String::new());
+    }
+    lsp.sync(&state, id)?;
+    let params = {
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&id).ok_or("Document is closed")?;
+        let (line, col) = doc.point_at(row, vcol);
+        json!({"textDocument": {"uri": uri_from_path(&doc.path)}, "position": {"line": line, "character": doc.utf16_col(line, col)}})
+    };
+    let res = lsp.request("textDocument/hover", params, lsp::TIMEOUT)?;
+    Ok(lsp::hover_text(&res["contents"]))
+}
+
+#[tauri::command(async)]
+fn lsp_format(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<()> {
+    let lsp = lsp_of(&app, &state, id)?;
+    if !lsp.can("documentFormattingProvider") {
+        return Err(format!("{} can't format this file", lsp.server.name));
+    }
+    lsp.sync(&state, id)?;
+    let (params, rev) = {
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&id).ok_or("Document is closed")?;
+        (json!({"textDocument": {"uri": uri_from_path(&doc.path)}, "options": {"tabSize": doc.tab, "insertSpaces": !doc.use_tabs}}), doc.rev)
+    };
+    let res = lsp.request("textDocument/formatting", params, lsp::TIMEOUT)?;
+    let n = |v: &Value| v.as_u64().unwrap_or(0) as usize;
+    let edits = res
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|e| {
+            let r = &e["range"];
+            (n(&r["start"]["line"]), n(&r["start"]["character"]), n(&r["end"]["line"]), n(&r["end"]["character"]), e["newText"].as_str().unwrap_or("").to_string())
+        })
+        .collect();
+    let mut docs = state.docs.lock().unwrap();
+    let doc = docs.get_mut(&id).ok_or("Document is closed")?;
+    if doc.rev != rev {
+        return Err("The file changed while it was being formatted".into());
+    }
+    doc.apply_utf16_edits(edits);
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn lsp_references(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<Vec<project::Hit>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (mut params, _, _) = at_cursor(id, &lsp, &state)?;
+    params["context"] = json!({"includeDeclaration": true});
+    let res = lsp.request("textDocument/references", params, std::time::Duration::from_secs(20))?;
+    let mut files: HashMap<std::path::PathBuf, Vec<String>> = HashMap::new();
+    let mut hits = vec![];
+    for loc in res.as_array().map_or(&[][..], Vec::as_slice) {
+        let Some(path) = loc["uri"].as_str().and_then(path_from_uri) else { continue };
+        let line = loc["range"]["start"]["line"].as_u64().unwrap_or(0) as usize;
+        let lines = files.entry(path.clone()).or_insert_with(|| fs::read_to_string(&path).map(|t| t.lines().map(String::from).collect()).unwrap_or_default());
+        let shown = path.to_string_lossy().into_owned();
+        hits.push(project::Hit {
+            rel: shown.clone(),
+            path: shown,
+            line,
+            col: loc["range"]["start"]["character"].as_u64().unwrap_or(0) as usize,
+            text: lines.get(line).map_or(String::new(), |l| l.trim().chars().take(160).collect()),
+        });
+    }
+    Ok(hits)
+}
+
+#[tauri::command(async)]
+fn lsp_rename(id: u32, name: String, app: AppHandle, state: State<'_, AppState>) -> Res<Vec<FileEdits>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (mut params, _, _) = at_cursor(id, &lsp, &state)?;
+    params["newName"] = json!(name);
+    let res = lsp.request("textDocument/rename", params, std::time::Duration::from_secs(20))?;
+    Ok(parse_workspace_edit(&res))
+}
+
+#[derive(Serialize)]
+struct Symbol {
+    name: String,
+    detail: String,
+    kind: u64,
+    depth: usize,
+    line: usize,
+    col: usize,
+}
+
+fn flatten_symbols(list: &[Value], depth: usize, out: &mut Vec<Symbol>) {
+    for s in list {
+        // Hierarchical symbols have a selectionRange; the flat kind only a location.
+        let start = if s["selectionRange"].is_object() { &s["selectionRange"]["start"] } else { &s["location"]["range"]["start"] };
+        out.push(Symbol {
+            name: s["name"].as_str().unwrap_or("").to_string(),
+            detail: s["detail"].as_str().or(s["containerName"].as_str()).unwrap_or("").to_string(),
+            kind: s["kind"].as_u64().unwrap_or(0),
+            depth,
+            line: start["line"].as_u64().unwrap_or(0) as usize,
+            col: start["character"].as_u64().unwrap_or(0) as usize,
+        });
+        flatten_symbols(s["children"].as_array().map_or(&[], Vec::as_slice), depth + 1, out);
+    }
+}
+
+#[tauri::command(async)]
+fn lsp_symbols(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<Vec<Symbol>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (params, _, _) = at_cursor(id, &lsp, &state)?;
+    let res = lsp.request("textDocument/documentSymbol", json!({"textDocument": params["textDocument"]}), lsp::TIMEOUT)?;
+    let mut out = vec![];
+    flatten_symbols(res.as_array().map_or(&[], Vec::as_slice), 0, &mut out);
+    Ok(out)
+}
+
+#[tauri::command(async)]
+fn lsp_workspace_symbols(query: String, id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<Vec<project::Hit>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let res = lsp.request("workspace/symbol", json!({"query": query}), lsp::TIMEOUT)?;
+    Ok(res
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .take(80)
+        .filter_map(|s| {
+            let path = s["location"]["uri"].as_str().and_then(path_from_uri)?;
+            let shown = path.to_string_lossy().into_owned();
+            let container = s["containerName"].as_str().filter(|c| !c.is_empty());
+            Some(project::Hit {
+                rel: shown.clone(),
+                path: shown,
+                line: s["location"]["range"]["start"]["line"].as_u64().unwrap_or(0) as usize,
+                col: s["location"]["range"]["start"]["character"].as_u64().unwrap_or(0) as usize,
+                text: match container {
+                    Some(c) => format!("{} ({c})", s["name"].as_str().unwrap_or("")),
+                    None => s["name"].as_str().unwrap_or("").to_string(),
+                },
+            })
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
+struct CodeAction {
+    title: String,
+    edit: Vec<FileEdits>,
+    command: Option<Value>,
+}
+
+#[tauri::command(async)]
+fn lsp_code_actions(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<Vec<CodeAction>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    let (params, _, _) = at_cursor(id, &lsp, &state)?;
+    let diagnostics: Vec<Value> = {
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&id).ok_or("Document is closed")?;
+        let (line, _) = doc.cursor_pos();
+        doc.diags.iter().filter(|d| d.sl <= line && line <= d.el).map(|d| d.raw.clone()).collect()
+    };
+    let req = json!({
+        "textDocument": params["textDocument"],
+        "range": {"start": params["position"], "end": params["position"]},
+        "context": {"diagnostics": diagnostics},
+    });
+    let res = lsp.request("textDocument/codeAction", req, lsp::TIMEOUT)?;
+    Ok(res
+        .as_array()
+        .map_or(&[][..], Vec::as_slice)
+        .iter()
+        .map(|a| CodeAction {
+            title: a["title"].as_str().unwrap_or("").to_string(),
+            edit: parse_workspace_edit(&a["edit"]),
+            command: if a["command"].is_object() { Some(a["command"].clone()) } else { a["arguments"].is_array().then(|| a.clone()) },
+        })
+        .collect())
+}
+
+#[tauri::command(async)]
+fn lsp_exec_command(command: Value, id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<()> {
+    let lsp = lsp_of(&app, &state, id)?;
+    lsp.request("workspace/executeCommand", json!({"command": command["command"], "arguments": command["arguments"]}), lsp::TIMEOUT).map(|_| ())
+}
+
+type Signature = (String, Option<(usize, usize)>);
+
+#[tauri::command(async)]
+fn lsp_signature(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<Option<Signature>> {
+    let lsp = lsp_of(&app, &state, id)?;
+    if !lsp.can("signatureHelpProvider") {
+        return Ok(None);
+    }
+    let (params, _, _) = at_cursor(id, &lsp, &state)?;
+    let res = lsp.request("textDocument/signatureHelp", params, lsp::TIMEOUT)?;
+    let i = res["activeSignature"].as_u64().unwrap_or(0) as usize;
+    let sig = &res["signatures"][i];
+    let Some(label) = sig["label"].as_str() else { return Ok(None) };
+    let param = sig["activeParameter"].as_u64().or(res["activeParameter"].as_u64()).unwrap_or(0) as usize;
+    let p = &sig["parameters"][param]["label"];
+    // The parameter is given as a range of the label, or as its text.
+    let range = p
+        .as_array()
+        .and_then(|r| Some((r.first()?.as_u64()? as usize, r.get(1)?.as_u64()? as usize)))
+        .or_else(|| p.as_str().and_then(|t| label.find(t).map(|b| (label[..b].encode_utf16().count(), label[..b].encode_utf16().count() + t.encode_utf16().count()))));
+    Ok(Some((label.to_string(), range)))
+}
+
+#[tauri::command(async)]
+fn lsp_semantic(id: u32, app: AppHandle, state: State<'_, AppState>) -> Res<()> {
+    let lsp = lsp_of(&app, &state, id)?;
+    if !lsp.can("semanticTokensProvider") {
+        return Ok(());
+    }
+    lsp.sync(&state, id)?;
+    let (uri, rev) = {
+        let docs = state.docs.lock().unwrap();
+        let doc = docs.get(&id).ok_or("Document is closed")?;
+        (uri_from_path(&doc.path), doc.rev)
+    };
+    let res = lsp.request("textDocument/semanticTokens/full", json!({"textDocument": {"uri": uri}}), lsp::TIMEOUT)?;
+    let tokens = lsp.decode_semantic(res["data"].as_array().map_or(&[], Vec::as_slice));
+    let mut docs = state.docs.lock().unwrap();
+    if let Some(doc) = docs.get_mut(&id).filter(|d| d.rev == rev) {
+        doc.set_semantic(tokens);
+    }
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -1165,6 +1560,7 @@ fn main() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState {
             docs: Mutex::new(HashMap::new()),
+            lsp: lsp::Servers::default(),
             next_doc: AtomicU32::new(1),
             runner: Arc::new(Runner::default()),
             terms: Mutex::new(HashMap::new()),
@@ -1215,6 +1611,25 @@ fn main() {
             app_version,
             doc_open_virtual,
             doc_apply_edits,
+            lsp_root,
+            lsp_config,
+            lsp_servers,
+            lsp_status,
+            lsp_restart,
+            lsp_sync,
+            lsp_complete,
+            lsp_definition,
+            lsp_hover,
+            lsp_hover_at,
+            lsp_format,
+            lsp_references,
+            lsp_rename,
+            lsp_symbols,
+            lsp_workspace_symbols,
+            lsp_code_actions,
+            lsp_exec_command,
+            lsp_signature,
+            lsp_semantic,
             doc_diags,
             doc_probe,
             doc_next_problem,

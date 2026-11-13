@@ -151,6 +151,7 @@
             <div id="v-run" class="view runview" hidden><div class="tgrid grow" id="run-term" hidden></div><div class="out grow" id="run-out" tabindex="0"></div><input id="stdin" spellcheck="false" autocomplete="off" hidden /></div>
             <div id="v-find" class="view list-view" hidden></div>
             <div id="v-terminal" class="view" hidden></div>
+            <div id="v-problems" class="view list-view" hidden></div>
           </section>
         </main>
         <div class="vr" id="right-rz" hidden></div>
@@ -163,6 +164,8 @@
       <footer id="status" hidden>
         <span id="st-path"></span>
         <span id="st-msg" class="grow"></span>
+        <button id="st-diag" class="stbtn" title="Problems (Alt+6)"></button>
+        <button id="st-lsp" class="stbtn" title="Language server"></button>
         <span id="st-pos"></span>
         <span id="st-lang" class="opt pick" title="Language mode"></span>
         <span id="st-eol" class="opt"></span>

@@ -82,6 +82,7 @@ export const settings = {
   newlineSave: load('newlineSave', false),
   updates: load('updates', true),
   discord: load('discord', true),
+  lspConfig: load('lspConfig', {}),
   termBar: load('termBar', false),
   ghost: load('ghost', true),
   ghostAi: load('ghostAi', true),
