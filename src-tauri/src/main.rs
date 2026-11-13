@@ -193,9 +193,18 @@ async fn update_check(app: AppHandle) -> Res<Option<update::UpdateInfo>> {
 
 #[tauri::command]
 async fn update_install(app: AppHandle, state: State<'_, AppState>) -> Res<()> {
-    update::install(&app).await?;
+    let after = update::install(&app).await?;
     stop_children(&state);
+    if after == update::After::Exit {
+        app.exit(0);
+        return Ok(());
+    }
     app.restart()
+}
+
+#[tauri::command(async)]
+fn update_page() -> Res<()> {
+    update::open_page()
 }
 
 #[tauri::command(async)]
@@ -1571,7 +1580,6 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             docs: Mutex::new(HashMap::new()),
             lsp: lsp::Servers::default(),
@@ -1625,6 +1633,7 @@ fn main() {
             app_version,
             update_check,
             update_install,
+            update_page,
             doc_open_virtual,
             doc_apply_edits,
             lsp_root,
